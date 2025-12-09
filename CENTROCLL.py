@@ -1,0 +1,736 @@
+import pandas as pd
+import re
+import os
+
+# ================== REGEX (CRA/CL y CLL/CR) ==================
+# Nota: aceptamos guiones -, – (en dash) y — (em dash)
+
+# ---------- CRA / CL ----------
+regex_cra_cl_ap_then_to = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\s*
+        (?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+)\s+
+        (?:(?:\bTO\b|\bTORRE\b|\bBQ\b|\bBLQ\b|\bBL\b|\bBLOQUE\b))\s*(?P<to>[A-Z0-9]+)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cra_cl_ap_textnum = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\s*
+        (?:APTO?|APARTAMENTO|AP)\s*(?:[A-ZÁÉÍÓÚÜÑ]+(?:\s+[A-ZÁÉÍÓÚÜÑ]+)*)\s*(?P<ap>\d+)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# TO alfanumérico y AP opcional
+regex_cra_cl_bq_to_ap = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\s*
+        (?:ET(?:APA)?\s*(?P<et>\d+))?\s*
+        .*?(?P<tipo>(?:\bTO\b|\bTORRE\b|\bT\b|\bBL\b|\bBQ\b|\bBLQ\b|\bBLOQUE\b))\s*
+        (?P<numtipo>(?:[A-Z0-9]+))
+        (?:\s*(?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s*LC\s+(?P<lc_raw>(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+)))?
+        (?:\s*(?P<tail>(?:PU\s+VIGILANCIA|MOTOBOMBA|(?:OFI(?:CINA)?|OF(?:ICINA)?)\s*\d+(?:\s*-\s*\d+)?|MACROMEDIDOR\s*\d+|ECR\s+[A-ZÁÉÍÓÚÜÑ\s]+)))?
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cra_cl_cs_lc = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)?(?P<guion>0*\d+)? 
+        (?:\s*N\s*\d+)?\s*
+        (?P<tipo2>CS|LC)\s*
+        (?P<num2>(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cra_cl_basico = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\b
+        (?:\s*(?P<tail>(?:PU\s+VIGILANCIA|MOTOBOMBA|MACROMEDIDOR\s*\d+|(?:OFI(?:CINA)?|OF(?:ICINA)?)\s*\d+(?:\s*-\s*\d+)?)))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s+(?:8000|NIU\s*\#?\s*\d+))*
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cra_cl_ap = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\s*
+        (?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+)
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s+(?:8000|NIU\s*\#?\s*\d+))*
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cra_cl_ap_sin_num = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\s*
+        (?:APTO?|APARTAMENTO|AP)\b(?!\s*\d)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cra_cl_macro = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)\s*
+        MACRO\s*(?P<macro>\d+)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# Permite texto suelto entre guion y MZ/CS (p.ej. "AMANECER")
+regex_cra_cl_mz_cs = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:(?:-|–|—)\s*|\s+)(?P<guion>0*\d+)
+        (?:\s+[A-ZÁÉÍÓÚÜÑ0-9]+){0,6}?\s*
+        MZ\s*(?P<mz>[A-Z0-9]+)\s*
+        CS\s*(?P<cs>[A-Z0-9]+)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# TO alfanumérico + AP; AP puede ser rango 803-804
+regex_cra_cl_to_ap = re.compile(
+    r"""CRA\s*(?P<cra>\d+)\s*
+        CL\s*(?P<cl>\d+[A-Z]?)\s*
+        (?:-|–|—)\s*(?P<guion>0*\d+)\s*
+        (?:TO|TORRE|T|BQ)\s*(?P<to>[A-Z0-9]+)\s*
+        (?:APTO?|APARTAMENTO|AP)\s*(?P<ap1>\d+)(?:\s*(?:-|–|—)\s*(?P<ap2>\d+))?
+        (?:\s+(?:8000|NIU\s*\#?\s*\d+))*
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# ---------- CLL / CR ----------
+regex_cll_cr_bq_to_ap = re.compile(
+    r"""CLL\s*(?P<cll>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:CR|CRA|KR|KRA|K|CL)\s*(?P<cr>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:(?:-|–|—)\s*|\#\s*)(?P<guion>0*\d+)\s*
+        (?:ET(?:APA)?\s*(?P<et>\d+))?\s*
+        .*?(?P<tipo>(?:\bTO\b|\bTORRE\b|\bT\b|\bBL\b|\bBQ\b|\bBLQ\b|\bBLOQUE\b))\s*
+        (?P<numtipo>(?!AP\b)[A-Z0-9]+)\s*
+        (?:\s*(?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s*LC\s+(?P<lc_raw>(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+)))?
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# AP ... luego TO/BQ/BL (PRIORIDAD)
+regex_cll_cr_ap_then_to = re.compile(
+    r"""CLL\s*(?P<cll>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:CR|CRA|KR|KRA|K|CL)\s*(?P<cr>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:(?:-|–|—)\s*|\#\s*)(?P<guion>0*\d+)\s*
+        (?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+)\s+
+        (?:(?:\bTO\b|\bTORRE\b|\bBQ\b|\bBLQ\b|\bBL\b|\bBLOQUE\b))\s*(?P<to>(?!AP\b)[A-Z0-9]+)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# CLL/CR con AP directo (sin TO/BQ/BL): "CLL 1A CR 12 - 36 AP 303"
+regex_cll_cr_ap_solo = re.compile(
+    r"""CLL\s*(?P<cll>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:CR|CRA|KR|KRA|K|CL)\s*(?P<cr>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:(?:-|–|—)\s*|\#\s*)(?P<guion>0*\d+)\s*
+        (?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+)\b
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# General CLL/CR (+ AC opcional, LC/CS, PI/AP/OF)
+regex_cll_cr_general = re.compile(
+    r"""CLL\s*(?P<cll>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:CR|CRA|KR|KRA|K|CL)\s*(?P<cr>\d+(?:[A-Z]{1,2})?(?:\s*BIS(?:\s*[A-Z])?)?)
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        (?:(?:(?:-|–|—)\s*|\#\s*|\s+)(?P<guion>0*\d+))?
+        (?:\s*(?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s*(?:OFI(?:CINA)?|OF(?:ICINA)?)\s*(?P<of>\d+(?:\s*-\s*\d+)?))?
+        (?:\s*LC\s+(?P<lc>(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+)))?
+        (?:\s*CS\s+(?P<cs>[A-Z0-9]+))?
+        (?:\s*AC\b)?
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# CLL/CR con MZ/CS (p.ej. "CLL 50N CR 16 -02 MZ C CS 03")
+regex_cll_cr_mz_cs = re.compile(
+    r"""CLL\s*(?P<cll>\d+(?:[A-Z]{1,2})?)          
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:CR|CRA|KR|KRA|K|CL)\s*(?P<cr>\d+(?:[A-Z]{1,2})?)  
+        (?:\s*(?:NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|N|S|E|O|NTE|STE|OTE|OCC))?
+        \s*(?:(?:-|–|—)\s*|\#\s*)(?P<guion>0*\d+)\s*
+        (?:\s+[A-ZÁÉÍÓÚÜÑ0-9]+){0,6}?\s*
+        MZ\s*(?P<mz>[A-Z0-9]+)\s*
+        CS\s*(?P<cs>[A-Z0-9]+)
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# ---------- CLL solos ----------
+regex_cll_hash = re.compile(
+    r"""CLL\s*
+        (?P<cll_num>\d+)
+        (?P<cll_suf>[A-Z]{1,2})?
+        (?:\s*(?P<bis>BIS)(?:\s*(?P<cll_bis_suf>[A-Z]))?)?
+        (?:\s*(?P<cll_orient>NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|NTE|STE|OTE|OCC|N|S|E|O))?
+        \s*(?:\#|N(?:O\.?|[°º])?|NRO\.?|NUM(?:ERO)?)\s*
+        (?P<num1>\d+[A-Z]?)\s*(?:-|–|—)\s*(?P<num2>0*\d+)
+        (?:\s*(?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s*LC\s+(?P<lc>(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+)))?
+        (?:\s*CS\s+(?P<cs>[A-Z0-9]+))?
+        (?:.*?(?:TO|TORRE|T|BQ|BL|BLQ|BLOQUE)\s*(?P<to>[A-Z0-9]+))?
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+regex_cll_dash = re.compile(
+    r"""CLL\s*
+        (?P<cll_num>\d+)
+        (?P<cll_suf>[A-Z]{1,2})?
+        (?:\s*(?P<bis>BIS)(?:\s*(?P<cll_bis_suf>[A-Z]))?)?
+        (?:\s*(?P<cll_orient>NORTE|SUR|ESTE|OESTE|ORIENTE|OCCIDENTE|NTE|STE|OTE|OCC|N|S|E|O))?
+        \s+(?P<num1>\d+[A-Z]?)\s*(?:-|–|—)\s*(?P<num2>0*\d+)
+        (?:\s*(?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+))?
+        (?:\s*(?:PI|PISO)\s*(?P<piso>\d+))?
+        (?:\s*LC\s+(?P<lc>(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+)))?
+        (?:\s*CS\s+(?P<cs>[A-Z0-9]+))?
+        (?:.*?(?:TO|TORRE|T|BQ|BL|BLQ|BLOQUE)\s*(?P<to>[A-Z0-9]+))?
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# ---------- MONTEAZUL ----------
+regex_monteazul = re.compile(
+    r"""URB\s+MONTEAZUL
+        (?:
+            .*?(?:APTO?|APARTAMENTO|AP)\s*(?P<ap>\d+).*?(?:BQ|BL|BLQ|BLOQUE|TO|TORRE|T)\s*(?P<to>\d+)
+            |
+            .*?(?:TO|TORRE|T|BQ|BL|BLQ|BLOQUE)\s*(?P<to2>\d+).*?(?:APTO?|APARTAMENTO|AP)\s*(?P<ap2>\d+)
+        )
+        (?:\s+(?:8000|NIU\s*\#?\s*\d+))*
+    """, re.IGNORECASE | re.VERBOSE
+)
+
+# ================== Helpers / Limpiezas ==================
+ROTULOS_A_REMOVER = [
+    "CLUB HOUSE", "CLUBHOUSE",
+    "CENTENARIO MALL", "MALL CENTENARIO", "FLORIDA BAJA",
+    "BALEARES", "AV BOLIVAR", "ED EL PILAR", "AMANECER",
+    "MALL ZN ORO", "LUXOR",
+]
+
+def limpiar_rotulos_finales(texto: str) -> str:
+    t = texto
+    for r in ROTULOS_A_REMOVER:
+        t = re.sub(rf"\s+{re.escape(r)}\s*[\.\-]*\s*$", "", t, flags=re.IGNORECASE)
+    return t
+
+_RE_SOTANO = re.compile(r"\bSOTANO\s*(\d+)\b", re.IGNORECASE)
+_RE_PLLIBRE = re.compile(r"\bPL\s+LIBRE\b", re.IGNORECASE)
+_RE_CAJERO  = re.compile(r"\bCAJERO\s*(\d+)\b", re.IGNORECASE)
+_RE_GRUPO   = re.compile(r"\bGRUPO\s+[A-ZÁÉÍÓÚÜÑ0-9 ]+\b", re.IGNORECASE)
+
+def normalizar_cola_lc(seg: str) -> str:
+    s = seg.strip()
+    s = limpiar_rotulos_finales(s)
+    s = re.sub(r'\s+AV(?:ENIDA)?\s+[A-ZÁÉÍÓÚÜÑ0-9\s]+$', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+ED(?:IFICIO)?\s+[A-ZÁÉÍÓÚÜÑ0-9\s]+$', '', s, flags=re.IGNORECASE)
+
+    m = re.search(r'\bLC\b\s*(\S+)?', s, flags=re.IGNORECASE)
+    if not m:
+        return s
+
+    base = "LC"
+    lc_id = m.group(1)
+    if lc_id:
+        lc_id = re.match(r'[A-Z0-9\-]+', lc_id, flags=re.IGNORECASE)
+        lc_id = lc_id.group(0) if lc_id else None
+    if lc_id:
+        base += f" {lc_id}"
+
+    tail = s[m.end():].strip()
+    tail = _RE_SOTANO.sub(lambda x: f"SOT {int(x.group(1))}", tail)
+    tail = _RE_PLLIBRE.sub("", tail)
+    tail = _RE_CAJERO.sub(lambda x: f"CAJ {int(x.group(1))}", tail)
+    tail = _RE_GRUPO.sub("", tail)
+
+    mpi = re.search(r'\b(?:PI|PISO)\s*(\d+)\b', tail, flags=re.IGNORECASE)
+    pi_txt = f" PI {int(mpi.group(1))}" if mpi else ""
+
+    out = (base + pi_txt).strip()
+    return out
+
+LC_PERMITIDO_COMPLETO = re.compile(
+    r'^LC\s+(?:\d+[A-Z]?|[A-Z]{1,3}\s*\d{1,4}|[A-Z]{1,3}\d{1,4}|\d+\s*-\s*\d+)(?:\s+PI\s*\d+)?$',
+    re.IGNORECASE
+)
+
+def lc_es_complejo(texto: str) -> bool:
+    m = re.search(r'\bLC\b.*$', texto, flags=re.IGNORECASE)
+    if not m:
+        return False
+    seg = m.group(0)
+    seg_norm = normalizar_cola_lc(seg)
+    return LC_PERMITIDO_COMPLETO.match(seg_norm) is None
+
+ORIENT_MAP = {
+    "NORTE":"N","SUR":"S","ESTE":"E","OESTE":"O","ORIENTE":"E","OCCIDENTE":"O",
+    "NTE":"N","STE":"S","OTE":"E","OCC":"O","N":"N","S":"S","E":"E","O":"O"
+}
+
+# ================== Normalizador ==================
+def normalizar_direccion(direccion: str):
+    if pd.isna(direccion):
+        return direccion, "0"
+
+    d = str(direccion).upper().strip()
+
+    # --- Normaliza espacios/guiones Unicode ---
+    d = re.sub(r"[\u00A0\u2000-\u200B\u202F\u205F\u3000]", " ", d)
+    d = re.sub(r"[‐‒–—―-]", "-", d)
+
+    # Limpiezas base y sinónimos
+    d = re.sub(r"\s*-\s*ARMENIA\b", "", d, flags=re.IGNORECASE)
+    d = re.sub(r"-?\s*NIU\s*\#?\s*-?\s*\d+\b", "", d, flags=re.IGNORECASE)
+    d = re.sub(r"\b(APTO?|APARTAMENTO|AP)\s*-\s*", r"\1 ", d, flags=re.IGNORECASE)
+    d = re.sub(r"\bCONS\b", "CN", d, flags=re.IGNORECASE)
+    d = re.sub(r"(?<!MACROMEDIDOR)(?<!MACRO)\s+8000\b", "", d)
+
+    # Unifica separadores
+    d = re.sub(r"\s*(?:-|–|—)\s*", " - ", d)
+    d = re.sub(r"\s+", " ", d).strip()
+
+    # Rótulos/colas al final
+    d = limpiar_rotulos_finales(d)
+    d = re.sub(r"\s+AV(?:ENIDA)?\s+[A-ZÁÉÍÓÚÜÑ0-9\s]+$", "", d, flags=re.IGNORECASE)
+    d = re.sub(r"\s+ED(?:IFICIO)?\s+[A-ZÁÉÍÓÚÜÑ0-9\s]+$", "", d, flags=re.IGNORECASE)
+
+    # Otros descartes suaves
+    d = re.sub(r"\bNIVEL\s*\d+\b", "", d, flags=re.IGNORECASE)
+    d = re.sub(
+        r"\s*-\s+(?!\d+\b)(?!ECR\b)(?!MACRO\b)(?!MACROMEDIDOR\b)[A-ZÁÉÍÓÚÜÑ]{3,}(?:\s+[A-ZÁÉÍÓÚÜÑ0-9]{2,})*$",
+        "",
+        d,
+        flags=re.IGNORECASE,
+    )
+    d = re.sub(r"\bIN\b(?=\s*\d)", "AP", d, flags=re.IGNORECASE)
+    d = re.sub(r"\s+", " ", d).strip()
+    d = re.sub(r"\s*-\s*$", "", d)
+
+    # Guardas
+    if re.search(r"\bLT\s*\d+\b", d):
+        return d, "0"
+    if lc_es_complejo(d):
+        return d, "0"
+
+    # Extractores globales
+    ofm = re.search(r"\b(?:OFI(?:CINA)?|OF(?:ICINA)?)\s*(\d+)\s*-\s*(\d+)\b", d)
+    if ofm:
+        of_text = f"OF {int(ofm.group(1))}-{int(ofm.group(2))}"
+    else:
+        ofs = re.search(r"\b(?:OFI(?:CINA)?|OF(?:ICINA)?)\s*(\d+)\b", d)
+        of_text = f"OF {int(ofs.group(1))}" if ofs else None
+
+    cnm = re.search(r"\bCN\s*([A-Z0-9]+)\b", d)
+    cn_text = f"CN {cnm.group(1)}" if cnm else None
+
+    # ================== CLL / CR ==================
+    m = regex_cll_cr_ap_then_to.search(d)
+    if m:
+        cll, cr, guion = m.group("cll"), m.group("cr"), m.group("guion")
+        ap, to = int(m.group("ap")), m.group("to")
+        out = f"CLL {cll} CR {cr} - {guion} TO {to} AP {ap}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cll_cr_ap_solo.search(d)
+    if m:
+        cll, cr, guion = m.group("cll"), m.group("cr"), m.group("guion")
+        ap = int(m.group("ap"))
+        out = f"CLL {cll} CR {cr} - {guion} AP {ap}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cll_cr_bq_to_ap.search(d)
+    if m:
+        cll, cr, guion = m.group("cll"), m.group("cr"), m.group("guion")
+        tipo, numt = m.group("tipo").upper(), m.group("numtipo")
+        ap, piso, et = m.group("ap"), m.group("piso"), m.group("et")
+        lc_r = m.group("lc_raw")
+        etiqueta = "BQ" if tipo in ("BL", "BLQ", "BLOQUE", "BQ") else "TO"
+        out = f"CLL {cll} CR {cr} - {guion} {etiqueta} {numt}"
+        if ap:   out += f" AP {int(ap)}"
+        if piso: out += f" PI {int(piso)}"
+        if et:   out += f" ET {int(et)}"
+        if lc_r:
+            out_lc = normalizar_cola_lc(f"LC {lc_r.strip()}")
+            out += f" {out_lc}"
+        elif re.search(r'\bLC\b', d, flags=re.IGNORECASE):
+            seg = re.search(r'\bLC\b.*$', d, flags=re.IGNORECASE).group(0)
+            out_lc = normalizar_cola_lc(seg)
+            out += f" {out_lc}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cll_cr_mz_cs.search(d)
+    if m:
+        cll, cr, guion = m.group("cll"), m.group("cr"), m.group("guion")
+        mz, cs = m.group("mz"), m.group("cs")
+        out = f"CLL {cll} CR {cr} - {guion} MZ {mz} CS {cs}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cll_cr_general.search(d)
+    if m:
+        cll, cr, guion = m.group("cll"), m.group("cr"), m.group("guion")
+        ap, piso, ofn, lc, cs = m.group("ap"), m.group("piso"), m.group("of"), m.group("lc"), m.group("cs")
+        if not guion:
+            mnum = re.search(
+                rf"(?:CR|CRA|KR|KRA|K|CL)\s*{re.escape(cr)}\s*(?:\#\s*|(?:-|–|—)\s*|\s+)(\d+)",
+                d
+            )
+            if mnum:
+                guion = mnum.group(1)
+        out = f"CLL {cll} CR {cr}"
+        if guion: out += f" - {guion}"
+        if ap:   out += f" AP {int(ap)}"
+        if piso: out += f" PI {int(piso)}"
+        if lc:
+            out_lc = normalizar_cola_lc(f"LC {lc.strip()}")
+            out += f" {out_lc}"
+        elif re.search(r'\bLC\b', d, flags=re.IGNORECASE):
+            seg = re.search(r'\bLC\b.*$', d, flags=re.IGNORECASE).group(0)
+            out_lc = normalizar_cola_lc(seg)
+            out += f" {out_lc}"
+        if cs:   out += f" CS {cs.strip()}"
+        if ofn:  out += f" OF {ofn.replace(' ', '')}"
+        elif of_text and "OF" not in out:
+            out += f" {of_text}"
+        if cn_text and "CN" not in out:
+            out += f" {cn_text}"
+        return out, "1"
+
+    # ======== CLL SOLO (# / Nº / NRO) ========
+    m = regex_cll_hash.search(d)
+    if m:
+        cll_num  = int(m.group("cll_num"))
+        cll_suf  = (m.group("cll_suf") or "").upper()
+        has_bis  = bool(m.group("bis"))
+        cll_bis_suf = (m.group("cll_bis_suf") or "").upper()
+        orient   = (m.group("cll_orient") or "").upper().replace(".", "")
+        if not orient and len(cll_suf) == 2 and cll_suf[-1] in ("N","S","E","O"):
+            orient, cll_suf = cll_suf[-1], cll_suf[0]
+        if cll_suf in ("N","S","E","O") and not orient:
+            orient, cll_suf = cll_suf, ""
+        orient = ORIENT_MAP.get(orient, "")
+        num1   = m.group("num1").strip()
+        num2   = int(m.group("num2"))
+        ap     = m.group("ap")
+        piso   = m.group("piso")
+        lc     = m.group("lc")
+        cs     = m.group("cs")
+        to     = m.group("to")
+
+        out = f"CLL {cll_num}{cll_suf}"
+        if has_bis:
+            out += " BIS" + (f" {cll_bis_suf}" if cll_bis_suf else "")
+        if orient: out += f" {orient}"
+        out += f" # {num1} - {num2}"
+        if to:   out += f" TO {to}"
+        if ap:   out += f" AP {int(ap)}"
+        if piso: out += f" PI {int(piso)}"
+        if lc:
+            out_lc = normalizar_cola_lc(f"LC {lc.strip()}")
+            out += f" {out_lc}"
+        elif re.search(r'\bLC\b', d, flags=re.IGNORECASE):
+            seg = re.search(r'\bLC\b.*$', d, flags=re.IGNORECASE).group(0)
+            out_lc = normalizar_cola_lc(seg)
+            out += f" {out_lc}"
+        if cs:   out += f" CS {cs.strip()}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    # ======== CLL SOLO con guion (sin '#') ========
+    m = regex_cll_dash.search(d)
+    if m:
+        cll_num  = int(m.group("cll_num"))
+        cll_suf  = (m.group("cll_suf") or "").upper()
+        has_bis  = bool(m.group("bis"))
+        cll_bis_suf = (m.group("cll_bis_suf") or "").upper()
+        orient   = (m.group("cll_orient") or "").upper().replace(".", "")
+        if not orient and len(cll_suf) == 2 and cll_suf[-1] in ("N","S","E","O"):
+            orient, cll_suf = cll_suf[-1], cll_suf[0]
+        if cll_suf in ("N","S","E","O") and not orient:
+            orient, cll_suf = cll_suf, ""
+        orient = ORIENT_MAP.get(orient, "")
+        num1   = m.group("num1").strip()
+        num2   = int(m.group("num2"))
+        ap     = m.group("ap")
+        piso   = m.group("piso")
+        lc     = m.group("lc")
+        cs     = m.group("cs")
+        to     = m.group("to")
+
+        out = f"CLL {cll_num}{cll_suf}"
+        if has_bis:
+            out += " BIS" + (f" {cll_bis_suf}" if cll_bis_suf else "")
+        if orient: out += f" {orient}"
+        out += f" {num1} - {num2}"
+        if to:   out += f" TO {to}"
+        if ap:   out += f" AP {int(ap)}"
+        if piso: out += f" PI {int(piso)}"
+        if lc:
+            out_lc = normalizar_cola_lc(f"LC {lc.strip()}")
+            out += f" {out_lc}"
+        elif re.search(r'\bLC\b', d, flags=re.IGNORECASE):
+            seg = re.search(r'\bLC\b.*$', d, flags=re.IGNORECASE).group(0)
+            out_lc = normalizar_cola_lc(seg)
+            out += f" {out_lc}"
+        if cs:   out += f" CS {cs.strip()}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    # ================== CRA / CL ==================
+    m = regex_cra_cl_ap_then_to.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        ap, to = int(m.group("ap")), m.group("to")
+        out = f"CRA {cra} CL {cl} - {guion} TO {to} AP {ap}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_ap_textnum.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        ap = int(m.group("ap"))
+        out = f"CRA {cra} CL {cl} - {guion} AP {ap}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_bq_to_ap.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        tipo, numt = m.group("tipo").upper(), m.group("numtipo")
+        ap, piso, et = m.group("ap"), m.group("piso"), m.group("et")
+        lc_raw, tail = m.group("lc_raw"), m.group("tail")
+        etiqueta = "BQ" if tipo in ("BL", "BLQ", "BLOQUE", "BQ") else "TO"
+        out = f"CRA {cra} CL {cl} - {guion} {etiqueta} {numt}"
+        if ap:   out += f" AP {int(ap)}"
+        if piso: out += f" PI {int(piso)}"
+        if et:   out += f" ET {int(et)}"
+        if lc_raw:
+            out_lc = normalizar_cola_lc(f"LC {lc_raw.strip()}")
+            out += f" {out_lc}"
+        elif re.search(r'\bLC\b', d, flags=re.IGNORECASE):
+            seg = re.search(r'\bLC\b.*$', d, flags=re.IGNORECASE).group(0)
+            out_lc = normalizar_cola_lc(seg)
+            out += f" {out_lc}"
+        if tail:   out += f" {tail.strip()}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_ap.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        ap, piso = int(m.group("ap")), m.group("piso")
+        out = f"CRA {cra} CL {cl} - {guion} AP {ap}"
+        if piso: out += f" PI {int(piso)}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_ap_sin_num.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        out = f"CRA {cra} CL {cl} - {guion} AP"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_macro.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        macro = int(m.group("macro"))
+        out = f"CRA {cra} CL {cl} - {guion} MACRO {macro}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_mz_cs.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        mz, cs = m.group("mz"), m.group("cs")
+        out = f"CRA {cra} CL {cl} - {guion} MZ {mz} CS {cs}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_cs_lc.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        tipo2, num2, piso = m.group("tipo2"), m.group("num2"), m.group("piso")
+        out = f"CRA {cra} CL {cl}"
+        if guion: out += f" - {guion}"
+        out += f" {tipo2.upper()}"
+        if num2:  out += f" {num2}"
+        if piso:  out += f" PI {int(piso)}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_basico.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        tail, piso = m.group("tail"), m.group("piso")
+        out = f"CRA {cra} CL {cl} - {guion}"
+        if tail: out += f" {tail.strip()}"
+        if piso: out += f" PI {int(piso)}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    m = regex_cra_cl_to_ap.search(d)
+    if m:
+        cra, cl, guion = m.group("cra"), m.group("cl"), m.group("guion")
+        to = m.group("to")
+        ap1 = int(m.group("ap1"))
+        ap2 = m.group("ap2")
+        out = f"CRA {cra} CL {cl} - {guion} TO {to} AP {ap1}"
+        if ap2:
+            out += f"-{int(ap2)}"
+        if of_text and "OF" not in out: out += f" {of_text}"
+        if cn_text and "CN" not in out: out += f" {cn_text}"
+        return out, "1"
+
+    if "MONTEAZUL" in d:
+        m = regex_monteazul.search(d)
+        if m:
+            ap = m.group("ap") or m.group("ap2")
+            to = m.group("to") or m.group("to2")
+            out = f"CRA 6 CL 51N - 25 TO {int(to)} AP {int(ap)}"
+            if of_text and "OF" not in out: out += f" {of_text}"
+            if cn_text and "CN" not in out: out += f" {cn_text}"
+            return out, "1"
+
+    # Sin normalizar
+    return d, "0"
+
+
+# ================== Anti-duplicados ==================
+def es_base_generica(s: str) -> bool:
+    if not isinstance(s, str):
+        return False
+    if re.search(r"\b(AP|PI|BQ|TO|ET|CS|LC|MZ|MACRO|MACROMEDIDOR|PU|MOTOBOMBA|OF|ECR|CN)\b", s):
+        return False
+    if re.match(r"^CRA\s+\d+\s+CL\s+\S+\s+-\s+\S+\s*$", s):
+        return True
+    if re.match(r"^CLL\s+\S+\s+CR\s+\S+\s+-\s+\S+\s*$", s):
+        return True
+    return False
+
+
+# ================== FUNCIÓN ESTÁNDAR ==================
+def procesar(df_in: pd.DataFrame) -> pd.DataFrame:
+    """
+    Recibe un DataFrame con columnas:
+      - NIU o CLIENTE_ID
+      - DIRECCION
+
+    Aplica:
+      - normalizar_direccion()
+      - filtro por CLL/CRA/ MONTEAZUL
+      - lógica anti-duplicados
+
+    Devuelve:
+      NIU, DIRECCION, DIRECCION_NORMALIZADA, VALIDACION
+    """
+    df = df_in.copy()
+
+    # Normalizar nombres de columnas
+    cols_upper = {c: c.upper().strip() for c in df.columns}
+
+    # Asegurar NIU
+    if "NIU" not in df.columns:
+        for c, up in cols_upper.items():
+            if up == "CLIENTE_ID":
+                df.rename(columns={c: "NIU"}, inplace=True)
+                break
+        if "NIU" not in df.columns:
+            raise ValueError("El DataFrame no tiene columna NIU ni CLIENTE_ID.")
+
+    # Asegurar DIRECCION
+    if "DIRECCION" not in df.columns:
+        for c, up in cols_upper.items():
+            if up.replace(" ", "") == "DIRECCION":
+                df.rename(columns={c: "DIRECCION"}, inplace=True)
+                break
+        if "DIRECCION" not in df.columns:
+            raise ValueError("El DataFrame no tiene columna DIRECCION.")
+
+    # Aplicar normalización
+    df[["DIRECCION_NORMALIZADA", "VALIDACION"]] = df["DIRECCION"].apply(
+        lambda x: pd.Series(normalizar_direccion(x))
+    )
+
+    # Filtro amplio: CLL, CRA/CL, MONTEAZUL
+    filtro = df["DIRECCION"].str.contains(
+        r"^\s*CLL\b|CRA\s*\d+\s*CL\s*\d+|MONTEAZUL",
+        case=False, na=False
+    )
+    df_filtrado = df[filtro].copy()
+
+    # Anti-duplicados (misma lógica que tenías)
+    cont = df_filtrado["DIRECCION_NORMALIZADA"].value_counts()
+    candidatas = {k for k, v in cont.items() if v > 2 and es_base_generica(k)}
+    mask_dup = df_filtrado["DIRECCION_NORMALIZADA"].isin(candidatas)
+    df_filtrado.loc[mask_dup, "DIRECCION_NORMALIZADA"] = df_filtrado.loc[mask_dup, "DIRECCION"]
+    df_filtrado.loc[mask_dup, "VALIDACION"] = "0"
+
+    columnas_salida = ["NIU", "DIRECCION", "DIRECCION_NORMALIZADA", "VALIDACION"]
+    for col in columnas_salida:
+        if col not in df_filtrado.columns:
+            df_filtrado[col] = None
+
+    return df_filtrado[columnas_salida]
+
+
+# ================== EJECUCIÓN INDIVIDUAL ==================
+if __name__ == "__main__":
+    ruta_entrada = "CICLO 29_PDIRECCION.xlsx"
+    ruta_salida   = "CICLOS_PROCESADOS_C29.xlsx"
+    hoja_salida   = "CICLO29_NORMALIZADO"
+
+    df = pd.read_excel(ruta_entrada, usecols=["CLIENTE_ID", "DIRECCION"])
+
+    df_resultado = procesar(df)
+
+    modo = "a" if os.path.exists(ruta_salida) else "w"
+    with pd.ExcelWriter(ruta_salida, engine="openpyxl", mode=modo) as writer:
+        df_resultado.to_excel(writer, sheet_name=hoja_salida, index=False)
+
+    total = df_resultado.shape[0]
+    normalizadas = (df_resultado["VALIDACION"] == "1").sum()
+    efectividad = (normalizadas / total * 100) if total > 0 else 0
+
+    print(f"✅ Archivo procesado y guardado como {ruta_salida}")
+    print(f"📄 Hoja: {hoja_salida}")
+    print(f"🔍 Total direcciones filtradas: {total}")
+    print(f"📊 Direcciones normalizadas: {normalizadas}")
+    print(f"📈 Efectividad: {round(efectividad, 2)}%")
